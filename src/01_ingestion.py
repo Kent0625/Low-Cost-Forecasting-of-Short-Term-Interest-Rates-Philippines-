@@ -27,6 +27,7 @@ def fetch_data():
     """
     Connects to FRED, pulls specific series, and saves raw CSVs.
     Supports manual override for PH_TBILL_3M via data/external/manual_ph_rates.csv.
+    Implements Metadata Watermarking for Data Lineage.
     """
     print("--------------------------------------------------")
     print(f"Starting Data Ingestion Job at {datetime.now()}")
@@ -50,12 +51,20 @@ def fetch_data():
         print(f"\n[PRIORITY] Found Manual PH Data: {MANUAL_SOURCE_FILE}")
         print("   -> Pipeline will use ACTUAL Philippine Rates.")
         
-        # Copy manual file to raw folder as the Target
-        target_path = os.path.join('data', 'raw', 'PH_TBILL_3M.csv')
-        os.makedirs(os.path.dirname(target_path), exist_ok=True)
-        shutil.copy(MANUAL_SOURCE_FILE, target_path)
-        print(f"   -> Copied to: {target_path}")
-        manual_override_active = True
+        # Load Manual Data, Add Watermark, Save as Target
+        try:
+            target_path = os.path.join('data', 'raw', 'PH_TBILL_3M.csv')
+            os.makedirs(os.path.dirname(target_path), exist_ok=True)
+            
+            df_manual = pd.read_csv(MANUAL_SOURCE_FILE, index_col=0, parse_dates=True)
+            # WATERMARKING: Tag the source
+            df_manual['data_source_type'] = 'MANUAL_PH_DATA'
+            
+            df_manual.to_csv(target_path)
+            print(f"   -> Watermarked & Saved to: {target_path}")
+            manual_override_active = True
+        except Exception as e:
+            print(f"   [ERROR] Failed to process manual file: {e}")
     else:
         print("\n[INFO] No Manual PH Data found. Proceeding with US Proxy Data for demonstration.")
 
@@ -67,10 +76,6 @@ def fetch_data():
         output_path = os.path.join('data', 'raw', f'{name}.csv')
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-        # Skip US_TBILL if we are using Manual Mode (we already have PH_TBILL)
-        # However, we might still want US data as a regressor? 
-        # For now, let's keep downloading everything to be safe, but the pipeline downstream needs to know what to use.
-        
         print(f"   Fetching from FRED ({series_id})...")
         try:
             # Pull data
@@ -79,6 +84,13 @@ def fetch_data():
             # Convert Series to DataFrame for better handling
             df = pd.DataFrame(data, columns=['value'])
             df.index.name = 'date'
+            
+            # WATERMARKING: Tag the source
+            # If it's one of our proxies, label it as such. Otherwise, standard API data.
+            if name in ['US_TBILL_3M', 'US_CPI']:
+                df['data_source_type'] = 'PROXY_US_DATA'
+            else:
+                df['data_source_type'] = 'FRED_API_DATA'
             
             # Basic Validation Log
             missing_count = df['value'].isna().sum()
@@ -94,9 +106,7 @@ def fetch_data():
         except Exception as e:
             print(f"   ERROR fetching {name}: {e}")
     
-    # If NO manual override, we need to create a copy of US_TBILL as 'PH_TBILL_3M' 
-    # so the rest of the pipeline (cleaning/modeling) doesn't break, 
-    # BUT we must log this clearly.
+    # If NO manual override, use the PROXY as the Target
     if not manual_override_active:
         print("\n[WARNING] Using US 3M T-Bill as PROXY for PH T-Bill.")
         print("   -> Copying data/raw/US_TBILL_3M.csv to data/raw/PH_TBILL_3M.csv")
@@ -105,7 +115,15 @@ def fetch_data():
         dst = os.path.join('data', 'raw', 'PH_TBILL_3M.csv')
         
         if os.path.exists(src):
-            shutil.copy(src, dst)
+            # Read, confirm watermark, and save to target location
+            try:
+                df_proxy = pd.read_csv(src, index_col='date', parse_dates=True)
+                # Ensure it's marked as proxy (should be already, but double check)
+                df_proxy['data_source_type'] = 'PROXY_US_DATA' 
+                df_proxy.to_csv(dst)
+                print(f"   -> Copied & Verified Watermark at: {dst}")
+            except Exception as e:
+                print(f"   [ERROR] Failed to copy proxy file: {e}")
         else:
             print("   [ERROR] Could not find US Proxy file to copy!")
 
